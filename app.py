@@ -200,8 +200,8 @@ def generate() -> Response:
 
 
 @app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok"}
+def health():
+    return "OK", 200
 
 
 if __name__ == "__main__":
