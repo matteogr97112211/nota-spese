@@ -54,7 +54,7 @@ label {
   font-size: 0.92rem;
   font-weight: 600;
 }
-input, select, button {
+input, select, button, summary {
   font: inherit;
 }
 input, select {
@@ -69,6 +69,7 @@ button {
   border-radius: 12px;
   padding: 12px 14px;
   font-weight: 700;
+  cursor: pointer;
 }
 button.primary { background: var(--primary); color: #fff; }
 button.success { background: var(--success); color: #fff; }
@@ -86,11 +87,45 @@ button.full { width: 100%; }
 .section-head h2, .item-header h3, .card h2 {
   margin: 0;
 }
+.section-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.95rem;
+}
 .item-card {
   border: 1px solid var(--line);
   border-radius: 16px;
   padding: 12px;
   background: #fbfdff;
+}
+.item-card.is-scanning {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(15, 98, 254, 0.08);
+}
+.receipt-tools {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin: 6px 0 12px;
+}
+.scan-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: #edf3ff;
+  color: var(--primary);
+  border-radius: 12px;
+  padding: 10px 12px;
+  cursor: pointer;
+  font-weight: 700;
+}
+.scan-btn input {
+  display: none;
+}
+.muted {
+  color: var(--muted);
+  font-size: 0.9rem;
 }
 .checkboxes {
   display: flex;
@@ -120,8 +155,26 @@ button.full { width: 100%; }
   flex-wrap: wrap;
   color: var(--muted);
 }
+.ocr-details {
+  margin-top: 12px;
+}
+.ocr-details summary {
+  cursor: pointer;
+  color: var(--primary);
+  font-weight: 700;
+}
+.ocr-output {
+  white-space: pre-wrap;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px;
+  max-height: 180px;
+  overflow: auto;
+  font-size: 0.82rem;
+}
 @media (max-width: 640px) {
   .grid.cols-2 { grid-template-columns: 1fr; }
-  .hero-actions, .section-head, .item-header, .summary { flex-direction: column; align-items: stretch; }
+  .hero-actions, .section-head, .item-header, .summary, .receipt-tools { flex-direction: column; align-items: stretch; }
   .app-shell { padding-inline: 10px; }
 }

@@ -5,13 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>{{ app_title }}</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 </head>
 <body>
   <div class="app-shell">
     <header class="hero card">
       <div>
         <h1>{{ app_title }}</h1>
-        <p>Compila la nota spese dal telefono e scarica il file Excel già pronto.</p>
+        <p>Compila la nota spese dal telefono, scatta lo scontrino e precompila automaticamente la riga spesa.</p>
       </div>
       <div class="hero-actions">
         <button type="button" class="ghost" id="saveDraftBtn">Salva bozza</button>
@@ -66,29 +67,30 @@
         </div>
       </section>
 
-      <section class="card">
+      <section class="card stack compact">
         <div class="section-head">
           <h2>Spese</h2>
-          <button type="button" class="primary" id="addExpenseBtn">+ Aggiungi spesa</button>
+          <button type="button" class="ghost small" id="addExpenseBtn">+ Aggiungi spesa</button>
         </div>
+        <p class="section-note">Su ogni riga puoi usare <strong>Scatta scontrino</strong>: la foto viene letta nel browser, i dati vengono estratti e l’immagine viene subito scartata.</p>
         <div id="expensesContainer" class="stack compact"></div>
       </section>
 
-      <section class="card">
+      <section class="card stack compact">
         <div class="section-head">
           <h2>Rimborso KM</h2>
-          <button type="button" class="primary" id="addTripBtn">+ Aggiungi tragitto</button>
+          <button type="button" class="ghost small" id="addTripBtn">+ Aggiungi tragitto</button>
         </div>
         <div id="tripsContainer" class="stack compact"></div>
       </section>
 
-      <section class="sticky-actions card">
-        <div class="summary" id="liveSummary">
-          <strong>Totale spese €:</strong> <span id="sumEuro">0,00</span>
-          <strong>Totale km:</strong> <span id="sumKm">0</span>
+      <div class="sticky-actions">
+        <div class="summary card">
+          <div><strong>Totale spese €:</strong> <span id="sumEuro">0,00</span></div>
+          <div><strong>Totale KM:</strong> <span id="sumKm">0</span></div>
         </div>
-        <button type="submit" class="success full">Genera Excel</button>
-      </section>
+        <button type="submit" class="primary full">Genera Excel</button>
+      </div>
     </form>
   </div>
 
@@ -97,6 +99,13 @@
       <div class="item-header">
         <h3>Spesa <span class="item-number"></span></h3>
         <button type="button" class="danger small remove-item">Rimuovi</button>
+      </div>
+      <div class="receipt-tools">
+        <label class="scan-btn">
+          <input class="receipt-input" type="file" accept="image/*" capture="environment">
+          <span>📷 Scatta scontrino</span>
+        </label>
+        <div class="scan-status muted">Nessuna scansione eseguita.</div>
       </div>
       <div class="grid cols-2">
         <label>Data<input data-field="data" type="date"></label>
@@ -122,6 +131,10 @@
         <label><input data-field="rappresentanza" type="checkbox"> Rappresentanza</label>
         <label><input data-field="fiera" type="checkbox"> Fiera</label>
       </div>
+      <details class="ocr-details">
+        <summary>Mostra testo letto</summary>
+        <pre class="ocr-output"></pre>
+      </details>
     </article>
   </template>
 
@@ -146,6 +159,8 @@
     const expensesContainer = document.getElementById('expensesContainer');
     const tripsContainer = document.getElementById('tripsContainer');
     const form = document.getElementById('expenseForm');
+    const currencyKeywords = /(totale|importo|pagare|da pagare|tot\.?|tot eur|saldo|euro|eur)/i;
+    const ignoreMerchant = /(p\.iva|partita iva|iva|ticket|bancomat|mastercard|visa|contante|pagamento|autorizz|documento|ricevuta|scontrino|totale|importo|euro|eur|grazie)/i;
 
     function textToNumber(value) {
       if (!value) return 0;
@@ -156,6 +171,128 @@
 
     function formatNumber(value, decimals = 2) {
       return value.toLocaleString('it-IT', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+    }
+
+    function normalizeDateToInput(day, month, year) {
+      let y = Number(year);
+      if (String(year).length === 2) y += y >= 70 ? 1900 : 2000;
+      return `${String(y).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    }
+
+    function extractDate(text) {
+      const patterns = [
+        /(\b\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4}\b)/g,
+        /(\b\d{4})[\/\-.](\d{1,2})[\/\-.](\d{1,2}\b)/g,
+      ];
+      for (const pattern of patterns) {
+        const match = pattern.exec(text);
+        pattern.lastIndex = 0;
+        if (!match) continue;
+        if (match[1].length === 4) {
+          return normalizeDateToInput(match[3], match[2], match[1]);
+        }
+        return normalizeDateToInput(match[1], match[2], match[3]);
+      }
+      return '';
+    }
+
+    function extractAmounts(lines) {
+      const candidates = [];
+      const regex = /(?:€\s*)?(\d{1,4}(?:[\.,]\d{2}))(?!\d)/g;
+      lines.forEach((line, idx) => {
+        const lower = line.toLowerCase();
+        for (const match of line.matchAll(regex)) {
+          const raw = match[1].replace('.', '').replace(',', '.');
+          const value = Number(raw);
+          if (!Number.isFinite(value) || value <= 0) continue;
+          let score = value;
+          if (currencyKeywords.test(lower)) score += 1000;
+          if (/iva|imponibile|resto|sconto/.test(lower)) score -= 200;
+          candidates.push({ value, score, line, idx });
+        }
+      });
+      candidates.sort((a, b) => b.score - a.score || b.value - a.value);
+      return candidates[0]?.value || 0;
+    }
+
+    function extractMerchant(lines) {
+      const candidates = lines
+        .map(line => line.replace(/[^\p{L}\p{N}\s&.'-]/gu, ' ').replace(/\s+/g, ' ').trim())
+        .filter(Boolean)
+        .filter(line => line.length > 2 && line.length < 45)
+        .filter(line => !/^[\d\s.,:/-]+$/.test(line))
+        .filter(line => !ignoreMerchant.test(line));
+      return candidates[0] || '';
+    }
+
+    function suggestCategory(text) {
+      const t = text.toLowerCase();
+      if (/(fuel|diesel|benzina|gasolio|esso|eni|ip |q8|tamoil|shell)/.test(t)) return 'Carburante IT';
+      if (/(hotel|albergo|ristorante|bar |trattoria|pizzeria|osteria|caffe|caff[eè]|breakfast|pranzo|cena)/.test(t)) return 'Vitto/Alloggio';
+      if (/(taxi|uber|metro|bus|treno|autostrada|pedaggio|parcheggio|parking|biglietto|flight|aeroporto)/.test(t)) return 'Spostamenti';
+      return 'Varie';
+    }
+
+    function parseReceiptText(text) {
+      const cleaned = text.replace(/\r/g, '\n');
+      const lines = cleaned.split('\n').map(line => line.trim()).filter(Boolean);
+      const amount = extractAmounts(lines);
+      const merchant = extractMerchant(lines);
+      const date = extractDate(cleaned);
+      const category = suggestCategory(cleaned + ' ' + merchant);
+      return {
+        importo_euro: amount ? formatNumber(amount, 2) : '',
+        causale: merchant,
+        data: date,
+        tipo: category,
+        rawText: cleaned,
+      };
+    }
+
+    async function scanReceipt(file, card) {
+      const statusEl = card.querySelector('.scan-status');
+      const outputEl = card.querySelector('.ocr-output');
+      statusEl.textContent = 'Analisi scontrino in corso...';
+      card.classList.add('is-scanning');
+      try {
+        const result = await Tesseract.recognize(file, 'ita+eng', {
+          logger: (m) => {
+            if (m.status === 'recognizing text') {
+              statusEl.textContent = `Lettura scontrino... ${Math.round((m.progress || 0) * 100)}%`;
+            }
+          }
+        });
+        const parsed = parseReceiptText(result.data.text || '');
+        outputEl.textContent = parsed.rawText || 'Nessun testo rilevato';
+
+        if (parsed.importo_euro) card.querySelector('[data-field="importo_euro"]').value = parsed.importo_euro;
+        if (parsed.causale) card.querySelector('[data-field="causale"]').value = parsed.causale;
+        if (parsed.data) card.querySelector('[data-field="data"]').value = parsed.data;
+        if (parsed.tipo) card.querySelector('[data-field="tipo"]').value = parsed.tipo;
+        if (parsed.rawText) {
+          card.querySelector('[data-field="con_fattura"]').checked = /(fattura|invoice)/i.test(parsed.rawText);
+        }
+
+        const filled = [parsed.importo_euro && 'importo', parsed.causale && 'causale', parsed.data && 'data', parsed.tipo && 'categoria'].filter(Boolean);
+        statusEl.textContent = filled.length ? `Compilati: ${filled.join(', ')}.` : 'Lettura completata, ma controlla i dati.';
+        updateSummary();
+      } catch (error) {
+        console.error(error);
+        statusEl.textContent = 'Errore nella lettura dello scontrino. Riprova con una foto più nitida.';
+      } finally {
+        const input = card.querySelector('.receipt-input');
+        input.value = '';
+        card.classList.remove('is-scanning');
+      }
+    }
+
+    function wireReceiptScanner(card) {
+      const input = card.querySelector('.receipt-input');
+      input.addEventListener('change', (event) => {
+        const file = event.target.files && event.target.files[0];
+        if (!file) return;
+        scanReceipt(file, card);
+      });
     }
 
     function addExpenseRow(prefill = {}) {
@@ -169,6 +306,11 @@
           input.value = prefill[key] || '';
         }
       });
+      wireReceiptScanner(card);
+      if (prefill.rawText) {
+        card.querySelector('.ocr-output').textContent = prefill.rawText;
+        card.querySelector('.scan-status').textContent = 'Dati caricati da bozza.';
+      }
       card.querySelector('.remove-item').addEventListener('click', () => {
         card.remove();
         renumberItems();
@@ -214,8 +356,10 @@
         card.querySelectorAll('[data-field]').forEach((el) => {
           item[el.dataset.field] = el.type === 'checkbox' ? (el.checked ? 'X' : '') : el.value;
         });
+        const rawText = card.querySelector('.ocr-output').textContent.trim();
+        if (rawText) item.rawText = rawText;
         return item;
-      }).filter((item) => Object.values(item).some(Boolean));
+      }).filter((item) => Object.entries(item).some(([key, val]) => key !== 'rawText' && val));
 
       data.tragitti = Array.from(document.querySelectorAll('#tripsContainer .item-card')).map((card) => {
         const item = {};
@@ -230,7 +374,11 @@
 
     function populateForm(data) {
       form.querySelectorAll('input[name], select[name], textarea[name]').forEach((el) => {
-        el.value = data[el.name] || '';
+        if (el.type === 'checkbox') {
+          el.checked = data[el.name] === 'X';
+        } else {
+          el.value = data[el.name] || '';
+        }
       });
       expensesContainer.innerHTML = '';
       tripsContainer.innerHTML = '';
@@ -249,7 +397,6 @@
 
     document.getElementById('addExpenseBtn').addEventListener('click', () => addExpenseRow());
     document.getElementById('addTripBtn').addEventListener('click', () => addTripRow());
-
     form.addEventListener('input', updateSummary);
 
     document.getElementById('saveDraftBtn').addEventListener('click', () => {
@@ -281,14 +428,14 @@
 
       const blob = await response.blob();
       const url = window.URL.createObjectURL(blob);
-      const link = document.createElement('a');
+      const a = document.createElement('a');
       const disposition = response.headers.get('Content-Disposition') || '';
-      const match = disposition.match(/filename="?([^\"]+)"?/i);
-      link.href = url;
-      link.download = match ? match[1] : 'nota_spese.xlsx';
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
+      const fileNameMatch = disposition.match(/filename="?([^";]+)"?/i);
+      a.href = url;
+      a.download = fileNameMatch ? fileNameMatch[1] : 'nota_spese.xlsx';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
       window.URL.revokeObjectURL(url);
     });
 
