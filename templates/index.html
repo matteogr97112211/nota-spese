@@ -1,34 +1,300 @@
-<!DOCTYPE html>
-<html>
+<!doctype html>
+<html lang="it">
 <head>
-<title>Nota Spese</title>
-<script src="/static/app.js"></script>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>{{ app_title }}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
+  <div class="app-shell">
+    <header class="hero card">
+      <div>
+        <h1>{{ app_title }}</h1>
+        <p>Compila la nota spese dal telefono e scarica il file Excel già pronto.</p>
+      </div>
+      <div class="hero-actions">
+        <button type="button" class="ghost" id="saveDraftBtn">Salva bozza</button>
+        <button type="button" class="ghost" id="loadDraftBtn">Carica bozza</button>
+      </div>
+    </header>
 
-<h1 style="text-align:center;">Nota Spese</h1>
-<p style="text-align:center; color:gray;">
-Creato ed ideato da <b>Matteo Greco</b>
-</p>
+    <form id="expenseForm" class="stack">
+      <section class="card">
+        <h2>Dati trasferta</h2>
+        <div class="grid cols-2">
+          <label>Rif EBS<input name="rif_ebs" type="text"></label>
+          <label>Autore<input name="autore" type="text"></label>
+          <label>Data inizio<input name="data_inizio" type="date"></label>
+          <label>Data fine<input name="data_fine" type="date"></label>
+          <label>Cliente<input name="cliente" type="text"></label>
+          <label>Luogo<input name="luogo" type="text"></label>
+          <label>Tipo<input name="tipo" type="text"></label>
+          <label>Causale<input name="causale_trasferta" type="text"></label>
+          <label>Centro costo / PRG<input name="centro_costo" type="text"></label>
+          <label>Dip. esecutore<input name="dip_esecutore" type="text"></label>
+          <label>Altro personale BS 1<input name="altro_personale_1" type="text"></label>
+          <label>Altro personale BS 2<input name="altro_personale_2" type="text"></label>
+          <label>Altro personale BS 3<input name="altro_personale_3" type="text"></label>
+          <label>Targa auto EBS<input name="targa_auto_ebs" type="text"></label>
+          <label>Notti Italia<input name="notti_italia" type="number" step="1" min="0"></label>
+          <label>Notti Estero<input name="notti_estero" type="number" step="1" min="0"></label>
+        </div>
+      </section>
 
-<hr>
+      <section class="card">
+        <h2>Gestione contanti / valuta</h2>
+        <div class="grid cols-2">
+          <label>Euro anticipati<input name="euro_anticipati" inputmode="decimal" type="text" placeholder="0,00"></label>
+          <label>Euro resi<input name="euro_resi" inputmode="decimal" type="text" placeholder="0,00"></label>
+          <label>Valuta anticipata<input name="valuta_anticipata" inputmode="decimal" type="text" placeholder="0,00"></label>
+          <label>Valuta resa<input name="valuta_resa" inputmode="decimal" type="text" placeholder="0,00"></label>
+          <label>Tipo valuta<input name="tipo_valuta" type="text" value="---"></label>
+          <label>Tasso cambio<input name="tasso_cambio" inputmode="decimal" type="text" value="1"></label>
+        </div>
+      </section>
 
-<h3>Scatta scontrino</h3>
-<input type="file" accept="image/*" onchange="uploadOCR(this)">
+      <section class="card">
+        <h2>Spese BS pagate da conto</h2>
+        <div class="grid cols-2">
+          <label>Causale 1<input name="bs_causale_1" type="text" value="Confort Viaggi  rif: "></label>
+          <label>Importo 1<input name="bs_causale_1_importo" inputmode="decimal" type="text" placeholder="0,00"></label>
+          <label>Causale 2<input name="bs_causale_2" type="text" value="TAXI EMMEPI, "></label>
+          <label>Importo 2<input name="bs_causale_2_importo" inputmode="decimal" type="text" placeholder="0,00"></label>
+          <label>Causale 3<input name="bs_causale_3" type="text" value="AVIS"></label>
+          <label>Importo 3<input name="bs_causale_3_importo" inputmode="decimal" type="text" placeholder="0,00"></label>
+        </div>
+      </section>
 
-<br><br>
+      <section class="card">
+        <div class="section-head">
+          <h2>Spese</h2>
+          <button type="button" class="primary" id="addExpenseBtn">+ Aggiungi spesa</button>
+        </div>
+        <div id="expensesContainer" class="stack compact"></div>
+      </section>
 
-<label>Importo:</label>
-<input id="importo">
+      <section class="card">
+        <div class="section-head">
+          <h2>Rimborso KM</h2>
+          <button type="button" class="primary" id="addTripBtn">+ Aggiungi tragitto</button>
+        </div>
+        <div id="tripsContainer" class="stack compact"></div>
+      </section>
 
-<br><br>
+      <section class="sticky-actions card">
+        <div class="summary" id="liveSummary">
+          <strong>Totale spese €:</strong> <span id="sumEuro">0,00</span>
+          <strong>Totale km:</strong> <span id="sumKm">0</span>
+        </div>
+        <button type="submit" class="success full">Genera Excel</button>
+      </section>
+    </form>
+  </div>
 
-<label>Data:</label>
-<input id="data">
+  <template id="expenseTemplate">
+    <article class="item-card">
+      <div class="item-header">
+        <h3>Spesa <span class="item-number"></span></h3>
+        <button type="button" class="danger small remove-item">Rimuovi</button>
+      </div>
+      <div class="grid cols-2">
+        <label>Data<input data-field="data" type="date"></label>
+        <label>Tipo
+          <select data-field="tipo">
+            <option value=""></option>
+            {% for item in spesa_types %}<option value="{{ item }}">{{ item }}</option>{% endfor %}
+          </select>
+        </label>
+        <label class="full-row">Causale<input data-field="causale" type="text"></label>
+        <label>Importo €<input data-field="importo_euro" inputmode="decimal" type="text" placeholder="0,00"></label>
+        <label>Importo valuta<input data-field="importo_valuta" inputmode="decimal" type="text" placeholder="0,00"></label>
+        <label>Pagamento
+          <select data-field="pagamento">
+            <option value=""></option>
+            {% for item in payment_types %}<option value="{{ item }}">{{ item }}</option>{% endfor %}
+          </select>
+        </label>
+      </div>
+      <div class="checkboxes">
+        <label><input data-field="con_fattura" type="checkbox"> Con fattura</label>
+        <label><input data-field="non_giustificata" type="checkbox"> Non giustificata</label>
+        <label><input data-field="rappresentanza" type="checkbox"> Rappresentanza</label>
+        <label><input data-field="fiera" type="checkbox"> Fiera</label>
+      </div>
+    </article>
+  </template>
 
-<br><br>
+  <template id="tripTemplate">
+    <article class="item-card">
+      <div class="item-header">
+        <h3>Tragitto <span class="item-number"></span></h3>
+        <button type="button" class="danger small remove-item">Rimuovi</button>
+      </div>
+      <div class="grid cols-2">
+        <label>Data<input data-field="data" type="date"></label>
+        <label>KM<input data-field="km" inputmode="decimal" type="text" placeholder="0"></label>
+        <label class="full-row">Causale<input data-field="causale" type="text" placeholder="Es. Torino → Cliente Milano"></label>
+      </div>
+    </article>
+  </template>
 
-<button onclick="genera()">Genera Excel</button>
+  <script>
+    const storageKey = 'notaSpeseMobileDraft';
+    const expenseTemplate = document.getElementById('expenseTemplate');
+    const tripTemplate = document.getElementById('tripTemplate');
+    const expensesContainer = document.getElementById('expensesContainer');
+    const tripsContainer = document.getElementById('tripsContainer');
+    const form = document.getElementById('expenseForm');
 
+    function textToNumber(value) {
+      if (!value) return 0;
+      const normalized = String(value).replace(/€/g, '').replace(/\s/g, '').replace(',', '.');
+      const parsed = Number(normalized);
+      return Number.isFinite(parsed) ? parsed : 0;
+    }
+
+    function formatNumber(value, decimals = 2) {
+      return value.toLocaleString('it-IT', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+    }
+
+    function addExpenseRow(prefill = {}) {
+      const fragment = expenseTemplate.content.cloneNode(true);
+      const card = fragment.querySelector('.item-card');
+      card.querySelectorAll('[data-field]').forEach((input) => {
+        const key = input.dataset.field;
+        if (input.type === 'checkbox') {
+          input.checked = prefill[key] === 'X';
+        } else {
+          input.value = prefill[key] || '';
+        }
+      });
+      card.querySelector('.remove-item').addEventListener('click', () => {
+        card.remove();
+        renumberItems();
+        updateSummary();
+      });
+      expensesContainer.appendChild(card);
+      renumberItems();
+    }
+
+    function addTripRow(prefill = {}) {
+      const fragment = tripTemplate.content.cloneNode(true);
+      const card = fragment.querySelector('.item-card');
+      card.querySelectorAll('[data-field]').forEach((input) => {
+        const key = input.dataset.field;
+        input.value = prefill[key] || '';
+      });
+      card.querySelector('.remove-item').addEventListener('click', () => {
+        card.remove();
+        renumberItems();
+        updateSummary();
+      });
+      tripsContainer.appendChild(card);
+      renumberItems();
+    }
+
+    function renumberItems() {
+      document.querySelectorAll('#expensesContainer .item-card').forEach((card, idx) => {
+        card.querySelector('.item-number').textContent = idx + 1;
+      });
+      document.querySelectorAll('#tripsContainer .item-card').forEach((card, idx) => {
+        card.querySelector('.item-number').textContent = idx + 1;
+      });
+    }
+
+    function collectData() {
+      const data = {};
+      form.querySelectorAll('input[name], select[name], textarea[name]').forEach((el) => {
+        data[el.name] = el.type === 'checkbox' ? (el.checked ? 'X' : '') : el.value;
+      });
+
+      data.spese = Array.from(document.querySelectorAll('#expensesContainer .item-card')).map((card) => {
+        const item = {};
+        card.querySelectorAll('[data-field]').forEach((el) => {
+          item[el.dataset.field] = el.type === 'checkbox' ? (el.checked ? 'X' : '') : el.value;
+        });
+        return item;
+      }).filter((item) => Object.values(item).some(Boolean));
+
+      data.tragitti = Array.from(document.querySelectorAll('#tripsContainer .item-card')).map((card) => {
+        const item = {};
+        card.querySelectorAll('[data-field]').forEach((el) => {
+          item[el.dataset.field] = el.value;
+        });
+        return item;
+      }).filter((item) => Object.values(item).some(Boolean));
+
+      return data;
+    }
+
+    function populateForm(data) {
+      form.querySelectorAll('input[name], select[name], textarea[name]').forEach((el) => {
+        el.value = data[el.name] || '';
+      });
+      expensesContainer.innerHTML = '';
+      tripsContainer.innerHTML = '';
+      (data.spese && data.spese.length ? data.spese : [{}]).forEach(addExpenseRow);
+      (data.tragitti && data.tragitti.length ? data.tragitti : [{}]).forEach(addTripRow);
+      updateSummary();
+    }
+
+    function updateSummary() {
+      const data = collectData();
+      const totalEuro = data.spese.reduce((acc, item) => acc + textToNumber(item.importo_euro), 0);
+      const totalKm = data.tragitti.reduce((acc, item) => acc + textToNumber(item.km), 0);
+      document.getElementById('sumEuro').textContent = formatNumber(totalEuro, 2);
+      document.getElementById('sumKm').textContent = formatNumber(totalKm, 0);
+    }
+
+    document.getElementById('addExpenseBtn').addEventListener('click', () => addExpenseRow());
+    document.getElementById('addTripBtn').addEventListener('click', () => addTripRow());
+
+    form.addEventListener('input', updateSummary);
+
+    document.getElementById('saveDraftBtn').addEventListener('click', () => {
+      localStorage.setItem(storageKey, JSON.stringify(collectData()));
+      alert('Bozza salvata sul dispositivo.');
+    });
+
+    document.getElementById('loadDraftBtn').addEventListener('click', () => {
+      const raw = localStorage.getItem(storageKey);
+      if (!raw) {
+        alert('Nessuna bozza trovata.');
+        return;
+      }
+      populateForm(JSON.parse(raw));
+      alert('Bozza caricata.');
+    });
+
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const payload = collectData();
+      const formData = new FormData();
+      formData.append('payload', JSON.stringify(payload));
+
+      const response = await fetch('/generate', { method: 'POST', body: formData });
+      if (!response.ok) {
+        alert('Errore nella generazione del file Excel.');
+        return;
+      }
+
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      const disposition = response.headers.get('Content-Disposition') || '';
+      const match = disposition.match(/filename="?([^\"]+)"?/i);
+      link.href = url;
+      link.download = match ? match[1] : 'nota_spese.xlsx';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+    });
+
+    addExpenseRow();
+    addTripRow();
+    updateSummary();
+  </script>
 </body>
 </html>
