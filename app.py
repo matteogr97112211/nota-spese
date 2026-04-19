@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import base64
 import io
 import json
 import os
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
-from flask import Flask, Response, render_template, request, send_file
+from flask import Flask, Response, jsonify, render_template, request, send_file
+from openai import OpenAI
 from openpyxl import load_workbook
+from pydantic import BaseModel, Field
 
 BASE_DIR = Path(__file__).resolve().parent
 TEMPLATE_FILE = BASE_DIR / "Nota Spese Modello.xlsx"
@@ -25,9 +28,30 @@ SPESA_TYPES = [
     "Prelievo Contante",
 ]
 PAYMENT_TYPES = ["CC-Personale", "Contante", "CC-Visa", "CC-Master", "DKV"]
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
+MAX_RECEIPT_SIZE = 8 * 1024 * 1024
 
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024
+app.config["MAX_CONTENT_LENGTH"] = 12 * 1024 * 1024
+
+
+class ReceiptExtraction(BaseModel):
+    merchant: Optional[str] = Field(default=None, description="Nome esercente o ragione sociale leggibile sullo scontrino.")
+    date_iso: Optional[str] = Field(default=None, description="Data dello scontrino in formato YYYY-MM-DD. Null se non chiara.")
+    amount_eur: Optional[float] = Field(default=None, description="Totale finale in euro, se lo scontrino è in EUR.")
+    amount_original: Optional[float] = Field(default=None, description="Totale finale nella valuta originale se non EUR oppure se non convertibile con certezza.")
+    currency: Optional[str] = Field(default=None, description="Codice valuta ISO, ad esempio EUR, USD, GBP. Null se non chiaro.")
+    suggested_type: Optional[str] = Field(default=None, description="Categoria più probabile tra: Vitto/Alloggio, Varie, Spostamenti, Carburante IT, Cambio € -> Valuta, Cambio Valuta -> €, Prelievo Contante.")
+    expense_description: Optional[str] = Field(default=None, description="Causale breve e pulita da mettere in nota spese.")
+    confidence: Optional[str] = Field(default=None, description="alta, media o bassa.")
+    raw_text_summary: Optional[str] = Field(default=None, description="Riassunto molto breve del contenuto letto.")
+
+
+def get_openai_client() -> OpenAI:
+    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY non configurata")
+    return OpenAI(api_key=api_key)
 
 
 def sanitize_filename(value: str) -> str:
@@ -143,6 +167,17 @@ def workbook_from_form(form: dict[str, Any]) -> io.BytesIO:
     return out
 
 
+def detect_mimetype(filename: str | None) -> str:
+    lower = (filename or "").lower()
+    if lower.endswith(".png"):
+        return "image/png"
+    if lower.endswith(".webp"):
+        return "image/webp"
+    if lower.endswith(".heic") or lower.endswith(".heif"):
+        return "image/heic"
+    return "image/jpeg"
+
+
 @app.get("/")
 def index() -> str:
     defaults = {
@@ -166,6 +201,7 @@ def index() -> str:
             }
         ],
         "tragitti": [{"data": "", "causale": "", "km": ""}],
+        "ai_ready": bool(os.environ.get("OPENAI_API_KEY", "").strip()),
     }
     return render_template(
         "index.html",
@@ -175,6 +211,69 @@ def index() -> str:
         data=defaults,
         generated=False,
     )
+
+
+@app.post("/scan-receipt")
+def scan_receipt():
+    uploaded = request.files.get("receipt")
+    if not uploaded or not uploaded.filename:
+        return jsonify({"error": "Nessuna immagine ricevuta."}), 400
+
+    raw = uploaded.read()
+    if not raw:
+        return jsonify({"error": "Immagine vuota."}), 400
+    if len(raw) > MAX_RECEIPT_SIZE:
+        return jsonify({"error": "Immagine troppo pesante. Tieni la foto sotto 8 MB."}), 400
+
+    try:
+        client = get_openai_client()
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 503
+
+    data_url = f"data:{detect_mimetype(uploaded.filename)};base64,{base64.b64encode(raw).decode('utf-8')}"
+
+    try:
+        response = client.responses.parse(
+            model=OPENAI_MODEL,
+            input=[
+                {
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": (
+                                "Analizza uno scontrino o giustificativo spese e restituisci solo dati realmente leggibili. "
+                                "Se un valore non è chiaro usa null. Il totale deve essere il totale finale pagato, "
+                                "non il subtotale. Se trovi EUR compila amount_eur, altrimenti amount_original e currency. "
+                                "La data va in formato YYYY-MM-DD. suggested_type deve essere una sola tra: "
+                                + ", ".join(SPESA_TYPES)
+                                + ". expense_description deve essere breve e pronta da inserire nella nota spese. "
+                                "Se sembra ristorante, hotel o bar usa Vitto/Alloggio. Taxi, treno, volo, parcheggio, pedaggio -> Spostamenti. "
+                                "Benzina, diesel, stazione servizio italiana -> Carburante IT. Bancomat/ATM -> Prelievo Contante. "
+                                "Cambio valuta -> usa la categoria relativa al cambio."
+                            ),
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "Estrai i dati utili per una nota spese da questa immagine."},
+                        {"type": "input_image", "image_url": data_url},
+                    ],
+                },
+            ],
+            text_format=ReceiptExtraction,
+        )
+        parsed = response.output_parsed
+    except Exception as exc:
+        return jsonify({"error": f"Analisi AI fallita: {exc}"}), 502
+
+    result = parsed.model_dump()
+    if result.get("currency") == "EUR" and result.get("amount_eur") is None and result.get("amount_original") is not None:
+        result["amount_eur"] = result["amount_original"]
+
+    return jsonify(result)
 
 
 @app.post("/generate")

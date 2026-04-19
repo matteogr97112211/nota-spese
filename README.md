@@ -1,80 +1,30 @@
-# Nota Spese Mobile - versione pronta per pubblicazione online
+# Nota Spese Mobile + scansione scontrino AI
 
-Web app mobile-first per compilare la nota spese dal telefono e generare un file Excel basato sul modello originale.
+Questa versione mantiene la web app originale e aggiunge la scansione scontrino su ogni riga spesa.
 
-## Cosa fa
-- compilazione dati trasferta
-- inserimento spese una per una
-- inserimento tragitti per rimborso km
-- salvataggio bozza nel browser del telefono
-- generazione dell'Excel finale dal modello `.xlsx`
+## Cosa serve
+- account OpenAI API
+- chiave API impostata come variabile ambiente `OPENAI_API_KEY`
+- facoltativo: `OPENAI_MODEL` (default `gpt-4.1-mini`)
 
-## Uso locale rapido
-
-### 1) Installa le dipendenze
+## Uso locale
 ```bash
 pip install -r requirements.txt
-```
-
-### 2) Avvia la web app
-```bash
+export OPENAI_API_KEY=la_tua_chiave
 python app.py
 ```
 
-### 3) Apri dal browser
-Sul PC:
-```text
-http://127.0.0.1:5000
-```
+## Render
+Nelle Environment Variables del servizio aggiungi:
+- `OPENAI_API_KEY` = la tua chiave API
+- `OPENAI_MODEL` = `gpt-4.1-mini` (oppure un altro modello compatibile con immagini)
 
-Dal cellulare sulla stessa rete Wi‑Fi:
-```text
-http://IP-DEL-PC:5000
-```
-
-## Pubblicazione online consigliata: Render
-Questa cartella è già pronta per Render.
-
-### Passi
-1. crea un account su Render
-2. carica questo progetto su GitHub
-3. su Render scegli **New + > Web Service**
-4. collega il repository GitHub
-5. Render rileverà già:
-   - `requirements.txt`
-   - `Procfile`
-   - `render.yaml`
-6. avvia il deploy
-7. a fine deploy avrai un link pubblico tipo:
-   - `https://nome-app.onrender.com`
-
-## Pubblicazione online alternativa: Railway
-Funziona anche su Railway senza modifiche.
-
-### Passi
-1. crea un account su Railway
-2. importa il progetto da GitHub
-3. Railway installerà le dipendenze da `requirements.txt`
-4. imposta come comando di start:
-```bash
-gunicorn app:app --bind 0.0.0.0:$PORT --workers 2 --timeout 120
-```
-5. completa il deploy e usa il link pubblico generato
-
-## Struttura file deploy
-- `app.py` → backend Flask
-- `templates/index.html` → interfaccia mobile
-- `static/style.css` → grafica responsive
-- `Nota Spese Modello.xlsx` → modello Excel compilato automaticamente
-- `requirements.txt` → dipendenze
-- `Procfile` → avvio production
-- `render.yaml` → configurazione rapida Render
-- `runtime.txt` → versione Python consigliata
-
-## Limiti attuali
-- fino a 130 righe spese
-- fino a 47 tragitti km
-- il campo `Fiera` viene scritto solo nelle righe supportate dal modello originale
+## Come funziona
+- Apri una riga spesa
+- Premi `📸 Scansiona scontrino`
+- Scatta o carica la foto
+- L'app prova a compilare data, importo, causale e tipo spesa
+- Controlla i campi e correggi se serve
 
 ## Nota importante
-Io posso prepararti il progetto già pronto per la pubblicazione, ma la messa online effettiva richiede un tuo account Render, Railway o simile.
+La scansione è molto più robusta del vecchio OCR locale, ma non è perfetta: se la foto è storta, mossa o il totale è poco leggibile, conviene controllare sempre il risultato.
