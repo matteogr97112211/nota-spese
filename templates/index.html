@@ -12,6 +12,8 @@
       <div>
         <h1>{{ app_title }}</h1>
         <p>Compila la nota spese dal telefono e scarica il file Excel già pronto.</p>
+        <p class="signature">Creato ed ideato da <strong>Matteo Greco</strong></p>
+        <p class="ai-note">Scansione scontrini AI: {% if data.ai_ready %}<strong>attiva</strong>{% else %}<strong>da configurare</strong>{% endif %}</p>
       </div>
       <div class="hero-actions">
         <button type="button" class="ghost" id="saveDraftBtn">Salva bozza</button>
@@ -116,6 +118,13 @@
           </select>
         </label>
       </div>
+
+      <div class="receipt-tools">
+        <input class="receipt-file-input" type="file" accept="image/*" capture="environment" hidden>
+        <button type="button" class="ghost small scan-receipt-btn">📸 Scansiona scontrino</button>
+        <span class="receipt-status">Nessuna scansione.</span>
+      </div>
+
       <div class="checkboxes">
         <label><input data-field="con_fattura" type="checkbox"> Con fattura</label>
         <label><input data-field="non_giustificata" type="checkbox"> Non giustificata</label>
@@ -158,6 +167,63 @@
       return value.toLocaleString('it-IT', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
     }
 
+    async function scanReceiptForCard(card) {
+      const fileInput = card.querySelector('.receipt-file-input');
+      const status = card.querySelector('.receipt-status');
+      const file = fileInput.files && fileInput.files[0];
+      if (!file) return;
+
+      status.textContent = 'Analisi AI in corso...';
+      const formData = new FormData();
+      formData.append('receipt', file);
+
+      try {
+        const response = await fetch('/scan-receipt', { method: 'POST', body: formData });
+        const data = await response.json();
+        if (!response.ok) {
+          status.textContent = data.error || 'Errore scansione.';
+          return;
+        }
+
+        const setField = (name, value) => {
+          if (value === null || value === undefined || value === '') return;
+          const input = card.querySelector(`[data-field="${name}"]`);
+          if (input) input.value = String(value).replace('.', ',');
+        };
+
+        if (data.date_iso) {
+          const input = card.querySelector('[data-field="data"]');
+          if (input) input.value = data.date_iso;
+        }
+        if (data.suggested_type) {
+          const input = card.querySelector('[data-field="tipo"]');
+          if (input) input.value = data.suggested_type;
+        }
+        if (data.expense_description) {
+          const input = card.querySelector('[data-field="causale"]');
+          if (input) input.value = data.expense_description;
+        } else if (data.merchant) {
+          const input = card.querySelector('[data-field="causale"]');
+          if (input) input.value = data.merchant;
+        }
+        if (typeof data.amount_eur === 'number') {
+          setField('importo_euro', data.amount_eur.toFixed(2));
+        }
+        if (typeof data.amount_original === 'number' && (!data.currency || data.currency !== 'EUR')) {
+          setField('importo_valuta', data.amount_original.toFixed(2));
+        }
+
+        const confidence = data.confidence ? `Confidenza ${data.confidence}` : 'Scansione completata';
+        const merchant = data.merchant ? ` · ${data.merchant}` : '';
+        status.textContent = `${confidence}${merchant}`;
+        updateSummary();
+      } catch (error) {
+        status.textContent = 'Errore di rete durante la scansione.';
+      } finally {
+        fileInput.value = '';
+      }
+    }
+
     function addExpenseRow(prefill = {}) {
       const fragment = expenseTemplate.content.cloneNode(true);
       const card = fragment.querySelector('.item-card');
@@ -169,11 +235,26 @@
           input.value = prefill[key] || '';
         }
       });
+
       card.querySelector('.remove-item').addEventListener('click', () => {
         card.remove();
         renumberItems();
         updateSummary();
       });
+
+      const scanBtn = card.querySelector('.scan-receipt-btn');
+      const fileInput = card.querySelector('.receipt-file-input');
+
+      if (scanBtn && fileInput) {
+        scanBtn.addEventListener('click', () => {
+          fileInput.click();
+        });
+
+        fileInput.addEventListener('change', () => {
+          scanReceiptForCard(card);
+        });
+      }
+
       expensesContainer.appendChild(card);
       renumberItems();
     }
