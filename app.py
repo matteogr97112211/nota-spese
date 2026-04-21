@@ -1,18 +1,17 @@
 from __future__ import annotations
 
-import base64
 import io
 import json
 import os
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
-from flask import Flask, Response, jsonify, render_template, request, send_file
-from openai import OpenAI
+import pytesseract
+from PIL import Image, ImageFilter, ImageOps
+from flask import Flask, Response, render_template, request, send_file
 from openpyxl import load_workbook
-from pydantic import BaseModel, Field
 
 BASE_DIR = Path(__file__).resolve().parent
 TEMPLATE_FILE = BASE_DIR / "Nota Spese Modello.xlsx"
@@ -28,30 +27,9 @@ SPESA_TYPES = [
     "Prelievo Contante",
 ]
 PAYMENT_TYPES = ["CC-Personale", "Contante", "CC-Visa", "CC-Master", "DKV"]
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
-MAX_RECEIPT_SIZE = 8 * 1024 * 1024
 
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 12 * 1024 * 1024
-
-
-class ReceiptExtraction(BaseModel):
-    merchant: Optional[str] = Field(default=None, description="Nome esercente o ragione sociale leggibile sullo scontrino.")
-    date_iso: Optional[str] = Field(default=None, description="Data dello scontrino in formato YYYY-MM-DD. Null se non chiara.")
-    amount_eur: Optional[float] = Field(default=None, description="Totale finale in euro, se lo scontrino è in EUR.")
-    amount_original: Optional[float] = Field(default=None, description="Totale finale nella valuta originale se non EUR oppure se non convertibile con certezza.")
-    currency: Optional[str] = Field(default=None, description="Codice valuta ISO, ad esempio EUR, USD, GBP. Null se non chiaro.")
-    suggested_type: Optional[str] = Field(default=None, description="Categoria più probabile tra: Vitto/Alloggio, Varie, Spostamenti, Carburante IT, Cambio € -> Valuta, Cambio Valuta -> €, Prelievo Contante.")
-    expense_description: Optional[str] = Field(default=None, description="Causale breve e pulita da mettere in nota spese.")
-    confidence: Optional[str] = Field(default=None, description="alta, media o bassa.")
-    raw_text_summary: Optional[str] = Field(default=None, description="Riassunto molto breve del contenuto letto.")
-
-
-def get_openai_client() -> OpenAI:
-    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY non configurata")
-    return OpenAI(api_key=api_key)
+app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024
 
 
 def sanitize_filename(value: str) -> str:
@@ -62,16 +40,18 @@ def sanitize_filename(value: str) -> str:
 def parse_date(value: str | None) -> datetime | None:
     if not value:
         return None
-    try:
-        return datetime.strptime(value, "%Y-%m-%d")
-    except ValueError:
-        return None
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y"):
+        try:
+            return datetime.strptime(value, fmt)
+        except ValueError:
+            continue
+    return None
 
 
 def parse_float(value: str | None) -> float | None:
     if value is None or value == "":
         return None
-    value = value.replace("€", "").replace(" ", "").replace(",", ".")
+    value = str(value).replace("€", "").replace(" ", "").replace(",", ".")
     try:
         return float(value)
     except ValueError:
@@ -160,48 +140,154 @@ def workbook_from_form(form: dict[str, Any]) -> io.BytesIO:
     set_riepilogo_fields(wb, form)
     fill_spese_sheet(wb, form.get("spese", []))
     fill_km_sheet(wb, form.get("tragitti", []))
-
     out = io.BytesIO()
     wb.save(out)
     out.seek(0)
     return out
 
 
-def detect_mimetype(filename: str | None) -> str:
-    lower = (filename or "").lower()
-    if lower.endswith(".png"):
-        return "image/png"
-    if lower.endswith(".webp"):
-        return "image/webp"
-    if lower.endswith(".heic") or lower.endswith(".heif"):
-        return "image/heic"
-    return "image/jpeg"
+def preprocess_image(file_storage) -> Image.Image:
+    image = Image.open(file_storage.stream)
+    image = ImageOps.exif_transpose(image).convert("L")
+    image = ImageOps.autocontrast(image)
+    w, h = image.size
+    if max(w, h) < 1800:
+        image = image.resize((w * 2, h * 2))
+    image = image.filter(ImageFilter.MedianFilter(size=3))
+    image = image.filter(ImageFilter.SHARPEN)
+    image = image.point(lambda p: 255 if p > 165 else 0)
+    return image
+
+
+def extract_amounts(text: str) -> list[float]:
+    candidates = []
+    for raw in re.findall(r"(?<!\d)(\d{1,4}(?:[.,]\d{3})*[.,]\d{2})(?!\d)", text):
+        cleaned = raw.replace(".", "").replace(",", ".")
+        try:
+            value = float(cleaned)
+        except ValueError:
+            continue
+        if 0.1 <= value <= 10000:
+            candidates.append(value)
+    return candidates
+
+
+def extract_date_iso(text: str) -> str | None:
+    patterns = [
+        r"\b(\d{2})[\/\-.](\d{2})[\/\-.](\d{4})\b",
+        r"\b(\d{2})[\/\-.](\d{2})[\/\-.](\d{2})\b",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if not match:
+            continue
+        d, m, y = match.groups()
+        if len(y) == 2:
+            y = "20" + y
+        try:
+            return datetime(int(y), int(m), int(d)).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    return None
+
+
+def choose_merchant(lines: list[str]) -> str:
+    banned = (
+        "pagamento", "carta", "bancomat", "iva", "p.iva", "ticket", "totale",
+        "subtotal", "subtotale", "resto", "euro", "eur", "contante", "documento",
+        "scontrino", "ricevuta", "lotto", "matr.", "codice", "transazione"
+    )
+    for line in lines[:8]:
+        low = line.lower()
+        if any(word in low for word in banned):
+            continue
+        digits = sum(c.isdigit() for c in line)
+        if digits > max(4, len(line) // 3):
+            continue
+        if len(line.strip()) < 3:
+            continue
+        return line[:80]
+    return lines[0][:80] if lines else ""
+
+
+def suggest_type(text: str) -> str:
+    low = text.lower()
+    if any(k in low for k in ["hotel", "b&b", "booking", "albergo", "residence"]):
+        return "Vitto/Alloggio"
+    if any(k in low for k in ["ristorante", "restaurant", "bar", "caffe", "caffè", "trattoria", "pizzeria", "breakfast"]):
+        return "Vitto/Alloggio"
+    if any(k in low for k in ["taxi", "uber", "metro", "treno", "bus", "parcheggio", "pedaggio", "autostrada"]):
+        return "Spostamenti"
+    if any(k in low for k in ["fuel", "diesel", "benzina", "gasolio", "eni", "q8", "shell", "tamoil", "esso", "ip "]):
+        return "Carburante IT"
+    return "Varie"
+
+
+def build_receipt_payload(text: str) -> dict[str, Any]:
+    lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines()]
+    lines = [line for line in lines if line]
+    date_iso = extract_date_iso(text)
+    amounts = extract_amounts(text)
+
+    keyword_amount = None
+    m = re.search(r"(?:totale|total|importo|amount|da pagare|pagato)[^\d]{0,12}(\d{1,4}(?:[.,]\d{3})*[.,]\d{2})", text.lower(), flags=re.IGNORECASE)
+    if m:
+        try:
+            keyword_amount = float(m.group(1).replace(".", "").replace(",", "."))
+        except ValueError:
+            keyword_amount = None
+
+    amount_eur = keyword_amount
+    if amount_eur is None and amounts:
+        amount_eur = max(amounts)
+
+    merchant = choose_merchant(lines)
+    expense_description = merchant or "Spesa da verificare"
+    confidence = "media"
+    if amount_eur and date_iso and merchant:
+        confidence = "alta"
+    elif amount_eur or date_iso:
+        confidence = "media"
+    else:
+        confidence = "bassa"
+
+    currency = "EUR"
+    lowered = text.lower()
+    if re.search(r"\b(?:usd|\$)\b", lowered):
+        currency = "USD"
+    elif re.search(r"\b(?:gbp|£)\b", lowered):
+        currency = "GBP"
+    elif re.search(r"\b(?:chf)\b", lowered):
+        currency = "CHF"
+
+    return {
+        "date_iso": date_iso,
+        "merchant": merchant,
+        "expense_description": expense_description,
+        "suggested_type": suggest_type(text),
+        "amount_eur": round(amount_eur, 2) if amount_eur is not None and currency == "EUR" else None,
+        "amount_original": round(amount_eur, 2) if amount_eur is not None and currency != "EUR" else None,
+        "currency": currency,
+        "confidence": confidence,
+        "ocr_text_preview": "\n".join(lines[:12]),
+    }
 
 
 @app.get("/")
 def index() -> str:
     defaults = {
+        "ai_ready": True,
         "tasso_cambio": "1",
         "tipo_valuta": "---",
         "bs_causale_1": "Confort Viaggi  rif: ",
         "bs_causale_2": "TAXI EMMEPI, ",
         "bs_causale_3": "AVIS",
-        "spese": [
-            {
-                "data": "",
-                "tipo": "",
-                "causale": "",
-                "importo_euro": "",
-                "importo_valuta": "",
-                "pagamento": "",
-                "con_fattura": "",
-                "non_giustificata": "",
-                "rappresentanza": "",
-                "fiera": "",
-            }
-        ],
+        "spese": [{
+            "data": "", "tipo": "", "causale": "", "importo_euro": "",
+            "importo_valuta": "", "pagamento": "", "con_fattura": "",
+            "non_giustificata": "", "rappresentanza": "", "fiera": "",
+        }],
         "tragitti": [{"data": "", "causale": "", "km": ""}],
-        "ai_ready": bool(os.environ.get("OPENAI_API_KEY", "").strip()),
     }
     return render_template(
         "index.html",
@@ -215,65 +301,20 @@ def index() -> str:
 
 @app.post("/scan-receipt")
 def scan_receipt():
-    uploaded = request.files.get("receipt")
-    if not uploaded or not uploaded.filename:
-        return jsonify({"error": "Nessuna immagine ricevuta."}), 400
-
-    raw = uploaded.read()
-    if not raw:
-        return jsonify({"error": "Immagine vuota."}), 400
-    if len(raw) > MAX_RECEIPT_SIZE:
-        return jsonify({"error": "Immagine troppo pesante. Tieni la foto sotto 8 MB."}), 400
+    if "receipt" not in request.files:
+        return {"error": "File mancante."}, 400
+    file = request.files["receipt"]
+    if not file.filename:
+        return {"error": "Nessun file selezionato."}, 400
 
     try:
-        client = get_openai_client()
-    except RuntimeError as exc:
-        return jsonify({"error": str(exc)}), 503
-
-    data_url = f"data:{detect_mimetype(uploaded.filename)};base64,{base64.b64encode(raw).decode('utf-8')}"
-
-    try:
-        response = client.responses.parse(
-            model=OPENAI_MODEL,
-            input=[
-                {
-                    "role": "system",
-                    "content": [
-                        {
-                            "type": "input_text",
-                            "text": (
-                                "Analizza uno scontrino o giustificativo spese e restituisci solo dati realmente leggibili. "
-                                "Se un valore non è chiaro usa null. Il totale deve essere il totale finale pagato, "
-                                "non il subtotale. Se trovi EUR compila amount_eur, altrimenti amount_original e currency. "
-                                "La data va in formato YYYY-MM-DD. suggested_type deve essere una sola tra: "
-                                + ", ".join(SPESA_TYPES)
-                                + ". expense_description deve essere breve e pronta da inserire nella nota spese. "
-                                "Se sembra ristorante, hotel o bar usa Vitto/Alloggio. Taxi, treno, volo, parcheggio, pedaggio -> Spostamenti. "
-                                "Benzina, diesel, stazione servizio italiana -> Carburante IT. Bancomat/ATM -> Prelievo Contante. "
-                                "Cambio valuta -> usa la categoria relativa al cambio."
-                            ),
-                        }
-                    ],
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "input_text", "text": "Estrai i dati utili per una nota spese da questa immagine."},
-                        {"type": "input_image", "image_url": data_url},
-                    ],
-                },
-            ],
-            text_format=ReceiptExtraction,
-        )
-        parsed = response.output_parsed
+        image = preprocess_image(file)
+        text = pytesseract.image_to_string(image, lang="eng", config="--psm 6")
+        if not text.strip():
+            text = pytesseract.image_to_string(image, lang="eng", config="--psm 11")
+        return build_receipt_payload(text)
     except Exception as exc:
-        return jsonify({"error": f"Analisi AI fallita: {exc}"}), 502
-
-    result = parsed.model_dump()
-    if result.get("currency") == "EUR" and result.get("amount_eur") is None and result.get("amount_original") is not None:
-        result["amount_eur"] = result["amount_original"]
-
-    return jsonify(result)
+        return {"error": f"Errore OCR: {exc}"}, 500
 
 
 @app.post("/generate")
@@ -299,8 +340,8 @@ def generate() -> Response:
 
 
 @app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok"}
+def health():
+    return "OK", 200
 
 
 if __name__ == "__main__":

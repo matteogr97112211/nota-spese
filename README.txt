@@ -1,7 +1,14 @@
-Sostituisci questo file nel tuo repo:
-templates/index.html
+Questo ZIP contiene SOLO i file da sostituire nel repo:
+- app.py
+- requirements.txt
+- Dockerfile
 
-Poi fai:
-1. Commit changes su GitHub
-2. Su Render: Manual Deploy -> Deploy latest commit
-3. Apri la web app con ?v=2 alla fine dell'URL per evitare cache
+Per usare OCR gratis su Render serve Docker, perche' il servizio Python standard non ha Tesseract.
+Passi:
+1. sostituisci questi file nel repo GitHub
+2. fai commit
+3. su Render crea un NUOVO Web Service di tipo Docker collegando lo stesso repo
+4. usa il nuovo link
+
+La tua UI attuale resta uguale.
+Cambia solo il backend della scansione scontrino.

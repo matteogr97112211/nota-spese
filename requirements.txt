@@ -1,5 +1,5 @@
 Flask
 gunicorn
 openpyxl
-openai
-pydantic
+Pillow
+pytesseract
